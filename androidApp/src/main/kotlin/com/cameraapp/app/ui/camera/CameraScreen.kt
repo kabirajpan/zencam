@@ -86,7 +86,10 @@ private fun CameraContent(viewModel: CameraViewModel) {
     var surfaceTexture by remember { mutableStateOf<SurfaceTexture?>(null) }
     var currentVideoFile by remember { mutableStateOf<File?>(null) }
 
-    // Always use 4:3 from the sensor — matches most phone cameras natively, no stretch
+    // Use 3264x2448 for FILM (matches recording), 4:3 preview for others
+    val filmRecordSize = remember(uiState.currentCameraId) {
+        android.util.Size(3264, 2448) // Max encoder-supported 4:3
+    }
     val previewSize = remember(uiState.currentCameraId) {
         cameraManager.getPreviewSize(uiState.currentCameraId, 4f / 3f)
     }
@@ -137,9 +140,10 @@ private fun CameraContent(viewModel: CameraViewModel) {
         }
     }
 
-    // When switching between photo/video, re-apply buffer size and restart preview
-    LaunchedEffect(uiState.currentMode.isVideo) {
+    // When switching modes, re-apply buffer size and restart preview
+    LaunchedEffect(uiState.currentMode) {
         val st = surfaceTexture ?: return@LaunchedEffect
+        // Always use full sensor preview — widest possible FOV
         st.setDefaultBufferSize(previewSize.width, previewSize.height)
         val surface = Surface(st)
         previewSurface = surface
@@ -276,11 +280,22 @@ private fun CameraContent(viewModel: CameraViewModel) {
                             }
                         } else {
                             val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(System.currentTimeMillis())
-                            val videoFile = File(context.cacheDir, "VID_$timestamp.mp4")
+                            val isFilmMode = uiState.currentMode == CameraMode.FILM
+                            val prefix = if (isFilmMode) "FILM" else "VID"
+                            val videoFile = File(context.cacheDir, "${prefix}_$timestamp.mp4")
                             currentVideoFile = videoFile
+                            // FILM = 4K UHD 16:9 (3840x2160), VIDEO = 1080p (1920x1080)
+                            val vw = if (isFilmMode) 3840 else 1920
+                            val vh = if (isFilmMode) 2160 else 1080
                             scope.launch {
-                                if (cameraManager.startRecording(surf, videoFile)) {
+                                val started = cameraManager.startRecording(surf, videoFile, vw, vh)
+                                if (started) {
                                     viewModel.setRecording(true)
+                                } else {
+                                    currentVideoFile = null
+                                    // Restart preview — session was closed during failed attempt
+                                    cameraManager.startPreview(surf)
+                                    Toast.makeText(context, "Recording failed", Toast.LENGTH_SHORT).show()
                                 }
                             }
                         }

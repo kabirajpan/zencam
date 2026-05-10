@@ -30,6 +30,50 @@ import kotlin.math.abs
 class Camera2Manager(private val context: Context) {
 
     private val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+
+    init {
+        // Dump all available sizes and encoder caps on init
+        try {
+            val chars = cameraManager.getCameraCharacteristics("0")
+            val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            val recSizes = map?.getOutputSizes(MediaRecorder::class.java)
+            val prevSizes = map?.getOutputSizes(SurfaceTexture::class.java)
+            val sensorSize = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+            
+            Log.d("Camera2Manager", "=== SENSOR INFO ===")
+            Log.d("Camera2Manager", "Active array: $sensorSize")
+            Log.d("Camera2Manager", "Preview sizes (4:3): ${
+                prevSizes?.filter { abs(it.width.toFloat() / it.height - 4f/3f) < 0.05f }
+                    ?.sortedByDescending { it.width * it.height }
+                    ?.joinToString { "${it.width}x${it.height}" }
+            }")
+            Log.d("Camera2Manager", "Recorder sizes (4:3): ${
+                recSizes?.filter { abs(it.width.toFloat() / it.height - 4f/3f) < 0.05f }
+                    ?.sortedByDescending { it.width * it.height }
+                    ?.joinToString { "${it.width}x${it.height}" }
+            }")
+            Log.d("Camera2Manager", "Recorder sizes (16:9): ${
+                recSizes?.filter { abs(it.width.toFloat() / it.height - 16f/9f) < 0.05f }
+                    ?.sortedByDescending { it.width * it.height }
+                    ?.joinToString { "${it.width}x${it.height}" }
+            }")
+            
+            // H264 encoder caps
+            val codecList = android.media.MediaCodecList(android.media.MediaCodecList.REGULAR_CODECS)
+            for (info in codecList.codecInfos) {
+                if (info.isEncoder && info.supportedTypes.any { it.equals("video/avc", ignoreCase = true) }) {
+                    val caps = info.getCapabilitiesForType("video/avc").videoCapabilities
+                    Log.d("Camera2Manager", "H264 Encoder '${info.name}': W=${caps.supportedWidths}, H=${caps.supportedHeights}, Bitrate=${caps.bitrateRange}")
+                }
+                if (info.isEncoder && info.supportedTypes.any { it.equals("video/hevc", ignoreCase = true) }) {
+                    val caps = info.getCapabilitiesForType("video/hevc").videoCapabilities
+                    Log.d("Camera2Manager", "HEVC Encoder '${info.name}': W=${caps.supportedWidths}, H=${caps.supportedHeights}, Bitrate=${caps.bitrateRange}")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("Camera2Manager", "Failed to dump sensor info", e)
+        }
+    }
     
     private var cameraDevice: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
@@ -51,18 +95,57 @@ class Camera2Manager(private val context: Context) {
 
     /**
      * Returns the best preview size for the given aspect ratio.
-     * @param ratio target width/height ratio (e.g. 4f/3f for photo, 16f/9f for video)
      */
     fun getPreviewSize(cameraId: String, ratio: Float): Size {
         val characteristics = cameraManager.getCameraCharacteristics(cameraId)
         val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
         val sizes = map?.getOutputSizes(SurfaceTexture::class.java) ?: return Size(1920, 1080)
 
-        // Find the largest size that matches the requested ratio (within tolerance)
         return sizes
             .filter { abs(it.width.toFloat() / it.height.toFloat() - ratio) < 0.05f }
             .maxByOrNull { it.width * it.height }
             ?: sizes.maxByOrNull { it.width * it.height }
+            ?: Size(1920, 1080)
+    }
+
+    /**
+     * Returns the best recording size for MediaRecorder at the given aspect ratio.
+     * Respects H264 encoder limits — won't pick a size the hardware can't encode.
+     */
+    fun getRecordingSize(cameraId: String, ratio: Float): Size {
+        val characteristics = cameraManager.getCameraCharacteristics(cameraId)
+        val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+        val sizes = map?.getOutputSizes(MediaRecorder::class.java) ?: return Size(1920, 1080)
+
+        // Query the H264 encoder's max supported resolution
+        val maxEncoderPixels = try {
+            val codecList = android.media.MediaCodecList(android.media.MediaCodecList.REGULAR_CODECS)
+            val encoderInfo = codecList.codecInfos.firstOrNull {
+                it.isEncoder && it.supportedTypes.any { type -> type.equals("video/avc", ignoreCase = true) }
+            }
+            val caps = encoderInfo?.getCapabilitiesForType("video/avc")?.videoCapabilities
+            if (caps != null) {
+                val maxW = caps.supportedWidths.upper
+                val maxH = caps.supportedHeights.upper
+                Log.d("Camera2Manager", "H264 encoder max: ${maxW}x${maxH}")
+                maxW * maxH
+            } else 1920 * 1080
+        } catch (e: Exception) {
+            1920 * 1080
+        }
+
+        val matching = sizes
+            .filter { abs(it.width.toFloat() / it.height.toFloat() - ratio) < 0.05f }
+            .filter { it.width * it.height <= maxEncoderPixels }
+            .sortedByDescending { it.width * it.height }
+
+        Log.d("Camera2Manager", "Recording sizes for ratio $ratio (encoder-safe): ${
+            matching.joinToString { "${it.width}x${it.height}" }
+        }")
+
+        return matching.firstOrNull()
+            ?: sizes.filter { it.width * it.height <= maxEncoderPixels }
+                .maxByOrNull { it.width * it.height }
             ?: Size(1920, 1080)
     }
     
@@ -227,7 +310,13 @@ class Camera2Manager(private val context: Context) {
         }
     }
 
-    suspend fun startRecording(previewSurface: Surface, outputFile: File): Boolean = suspendCoroutine { continuation ->
+    suspend fun startRecording(
+        previewSurface: Surface,
+        outputFile: File,
+        videoWidth: Int = 1920,
+        videoHeight: Int = 1080,
+        useHevc: Boolean = false
+    ): Boolean = suspendCoroutine { continuation ->
         val device = cameraDevice ?: run {
             continuation.resume(false)
             return@suspendCoroutine
@@ -235,7 +324,7 @@ class Camera2Manager(private val context: Context) {
 
         try {
             captureSession?.close()
-            setupMediaRecorder(outputFile)
+            setupMediaRecorder(outputFile, videoWidth, videoHeight, useHevc)
             val recorderSurface = mediaRecorder!!.surface
             
             activePreviewSurface = previewSurface
@@ -244,6 +333,13 @@ class Camera2Manager(private val context: Context) {
             val recordingRequestBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
             recordingRequestBuilder.addTarget(previewSurface)
             recordingRequestBuilder.addTarget(recorderSurface)
+
+            // Lock crop to full sensor — prevents zoom when recording starts
+            val characteristics = cameraManager.getCameraCharacteristics(currentCameraId)
+            val sensorRect = characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+            if (sensorRect != null) {
+                recordingRequestBuilder.set(CaptureRequest.SCALER_CROP_REGION, sensorRect)
+            }
 
             val captureCallback = object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(session: CameraCaptureSession) {
@@ -266,7 +362,8 @@ class Camera2Manager(private val context: Context) {
                 }
             }
 
-            val surfaces = listOf(previewSurface, recorderSurface, imageReader!!.surface)
+            // Only preview + recorder — no imageReader (avoids forcing the camera to recrop)
+            val surfaces = listOf(previewSurface, recorderSurface)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 val outputConfigs = surfaces.map { OutputConfiguration(it) }
                 val sessionConfig = SessionConfiguration(
@@ -287,7 +384,7 @@ class Camera2Manager(private val context: Context) {
         }
     }
 
-    private fun setupMediaRecorder(outputFile: File, width: Int = 1920, height: Int = 1080) {
+    private fun setupMediaRecorder(outputFile: File, width: Int = 1920, height: Int = 1080, useHevc: Boolean = false) {
         mediaRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             MediaRecorder(context)
         } else {
@@ -298,10 +395,17 @@ class Camera2Manager(private val context: Context) {
             setVideoSource(MediaRecorder.VideoSource.SURFACE)
             setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
             setOutputFile(outputFile.absolutePath)
-            setVideoEncodingBitRate(20_000_000)
+            val pixels = width * height
+            val bitrate = (pixels * 10L * 30 / 8).coerceIn(10_000_000, 100_000_000).toInt()
+            val codec = if (useHevc) "HEVC" else "H264"
+            Log.d("Camera2Manager", "Recording ${width}x${height} @ ${bitrate/1_000_000}Mbps ($codec)")
+            setVideoEncodingBitRate(bitrate)
             setVideoFrameRate(30)
             setVideoSize(width, height)
-            setVideoEncoder(MediaRecorder.VideoEncoder.H264)
+            setVideoEncoder(
+                if (useHevc) MediaRecorder.VideoEncoder.HEVC
+                else MediaRecorder.VideoEncoder.H264
+            )
             setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
             setAudioEncodingBitRate(128_000)
             setAudioSamplingRate(44100)
