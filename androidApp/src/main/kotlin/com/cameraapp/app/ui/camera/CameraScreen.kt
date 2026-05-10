@@ -8,6 +8,8 @@ import android.view.Surface
 import android.view.TextureView
 import android.view.ViewGroup
 import androidx.compose.animation.*
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.pager.rememberPagerState
@@ -15,8 +17,11 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.unit.dp
@@ -25,6 +30,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.cameraapp.app.ui.camera.components.*
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -70,16 +76,29 @@ private fun CameraContent(viewModel: CameraViewModel) {
     val uiState by viewModel.uiState.collectAsState()
     val cameraManager = remember { Camera2Manager(context) }
     
-    val pagerState = rememberPagerState(initialPage = 0, pageCount = { CameraMode.values().size })
     var previewSurface by remember { mutableStateOf<Surface?>(null) }
     val targetRatio = if (isLandscape) 4f / 3f else 3f / 4f
 
+    // Transition State
+    var isSwitchingMode by remember { mutableStateOf(false) }
+    val transitionAlpha by animateFloatAsState(
+        targetValue = if (isSwitchingMode) 1f else 0f,
+        animationSpec = tween(durationMillis = 180, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+        label = "ModeTransition"
+    )
+    val transitionBlur by animateFloatAsState(
+        targetValue = if (isSwitchingMode) 12f else 0f,
+        animationSpec = tween(durationMillis = 200, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+        label = "BlurTransition"
+    )
+    val transitionScale by animateFloatAsState(
+        targetValue = if (isSwitchingMode) 1.03f else 1f,
+        animationSpec = tween(durationMillis = 200, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+        label = "ScaleTransition"
+    )
+
     DisposableEffect(Unit) {
         onDispose { cameraManager.closeCamera() }
-    }
-
-    LaunchedEffect(pagerState.currentPage) {
-        viewModel.setMode(CameraMode.values()[pagerState.currentPage])
     }
 
     LaunchedEffect(previewSurface, uiState.currentCameraId) {
@@ -105,14 +124,13 @@ private fun CameraContent(viewModel: CameraViewModel) {
         previewSurface?.let { cameraManager.startPreview(it) }
     }
 
-    // MAIN LAYOUT: Using a Box to layer components correctly without scope leaks
     Box(modifier = Modifier.fillMaxSize()) {
         
-        // 1. Camera Preview (Bottom Layer)
+        // 1. Viewport Layer
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(top = 64.dp, bottom = 180.dp) // Leave space for bars
+                .padding(top = 56.dp, bottom = 150.dp) // Minimal bars
                 .clipToBounds(),
             contentAlignment = Alignment.Center
         ) {
@@ -132,11 +150,24 @@ private fun CameraContent(viewModel: CameraViewModel) {
                         }
                     }
                 },
-                modifier = Modifier.fillMaxWidth().aspectRatio(targetRatio)
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(targetRatio)
+                    .graphicsLayer {
+                        scaleX = transitionScale
+                        scaleY = transitionScale
+                    }
+                    .blur(transitionBlur.dp)
             )
 
-            // Overlays inside the Preview Box
-            androidx.compose.animation.AnimatedVisibility(
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .alpha(transitionAlpha * 0.4f)
+                    .background(Color.Black)
+            )
+
+            AnimatedVisibility(
                 visible = uiState.isRecording,
                 enter = fadeIn(),
                 exit = fadeOut(),
@@ -145,8 +176,8 @@ private fun CameraContent(viewModel: CameraViewModel) {
                 RecordingIndicator()
             }
 
-            androidx.compose.animation.AnimatedVisibility(
-                visible = uiState.isManualMode,
+            AnimatedVisibility(
+                visible = uiState.isManualMode && !isSwitchingMode,
                 enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
                 exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
                 modifier = Modifier.align(Alignment.BottomCenter)
@@ -173,9 +204,18 @@ private fun CameraContent(viewModel: CameraViewModel) {
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             CameraModeSelector(
-                pagerState = pagerState,
-                onModeSelected = { page -> scope.launch { pagerState.animateScrollToPage(page) } }
-            )
+            currentMode = uiState.currentMode,
+            onModeSelected = { mode ->
+                if (mode != uiState.currentMode) {
+                    scope.launch {
+                        isSwitchingMode = true
+                        viewModel.setMode(mode)
+                        delay(250) // Quick, snappy transition
+                        isSwitchingMode = false
+                    }
+                }
+            }
+        )
 
             CameraBottomBar(
                 isRecording = uiState.isRecording,

@@ -2,6 +2,11 @@ package com.cameraapp.app.ui.camera.components
 
 import android.hardware.camera2.CaptureRequest
 import androidx.compose.foundation.layout.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.FlashAuto
+import androidx.compose.material.icons.filled.FlashOff
+import androidx.compose.material.icons.filled.FlashOn
+import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -21,29 +26,32 @@ fun CameraTopBar(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .height(64.dp)
-            .padding(horizontal = 24.dp),
+            .height(56.dp) // Slimmer top bar
+            .padding(horizontal = 20.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
         Text(
             text = "4:3",
-            color = Color.White,
-            fontWeight = FontWeight.Bold,
-            fontSize = 14.sp
+            color = Color.White.copy(alpha = 0.8f), // Subtle text
+            fontWeight = FontWeight.Medium,
+            fontSize = 12.sp
         )
 
-        IconButton(onClick = onFlashToggle) {
+        IconButton(
+            onClick = onFlashToggle,
+            modifier = Modifier.size(32.dp) // Smaller touch target for minimal look
+        ) {
             val icon = when (flashMode) {
-                CaptureRequest.CONTROL_AE_MODE_ON -> "⚡A"
-                CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH -> "⚡ON"
-                else -> "⚡OFF"
+                CaptureRequest.CONTROL_AE_MODE_ON -> Icons.Default.FlashAuto
+                CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH -> Icons.Default.FlashOn
+                else -> Icons.Default.FlashOff
             }
-            Text(
-                text = icon,
-                color = Color.White,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Bold
+            Icon(
+                imageVector = icon,
+                contentDescription = "Flash Mode",
+                tint = Color.White,
+                modifier = Modifier.size(18.dp) // Minimal icon size
             )
         }
     }
