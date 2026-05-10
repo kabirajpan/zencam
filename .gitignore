@@ -1,0 +1,34 @@
+# Android/Gradle
+.gradle/
+build/
+local.properties
+*.apk
+*.aar
+*.ap_
+*.dex
+/captures/
+.externalNativeBuild
+.cxx
+
+# IntelliJ/Android Studio
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# Kotlin/Multiplatform
+.kotlin/
+.konan/
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
+
+# Mobile Specific
+iosApp/iosApp.xcworkspace/
+iosApp/iosApp.xcodeproj/project.xcworkspace/
+iosApp/iosApp.xcodeproj/xcuserdata/
