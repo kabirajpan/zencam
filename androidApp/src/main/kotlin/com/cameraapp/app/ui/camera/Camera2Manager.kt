@@ -22,6 +22,7 @@ import java.util.*
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.suspendCoroutine
+import kotlin.math.abs
 
 /**
  * Enhanced Camera2Manager supporting Photo, Video, and Pro controls.
@@ -47,6 +48,23 @@ class Camera2Manager(private val context: Context) {
     // Configuration
     private var currentCameraId: String = "0"
     private var flashMode: Int = CaptureRequest.CONTROL_AE_MODE_ON
+
+    /**
+     * Returns the best preview size for the given aspect ratio.
+     * @param ratio target width/height ratio (e.g. 4f/3f for photo, 16f/9f for video)
+     */
+    fun getPreviewSize(cameraId: String, ratio: Float): Size {
+        val characteristics = cameraManager.getCameraCharacteristics(cameraId)
+        val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+        val sizes = map?.getOutputSizes(SurfaceTexture::class.java) ?: return Size(1920, 1080)
+
+        // Find the largest size that matches the requested ratio (within tolerance)
+        return sizes
+            .filter { abs(it.width.toFloat() / it.height.toFloat() - ratio) < 0.05f }
+            .maxByOrNull { it.width * it.height }
+            ?: sizes.maxByOrNull { it.width * it.height }
+            ?: Size(1920, 1080)
+    }
     
     private fun startBackgroundThread() {
         if (backgroundThread != null) return
@@ -108,6 +126,10 @@ class Camera2Manager(private val context: Context) {
             return@suspendCoroutine
         }
         
+        // Close existing session before creating a new one
+        try { captureSession?.close() } catch (_: Exception) {}
+        captureSession = null
+        
         activePreviewSurface = surface
         activeRecorderSurface = null
 
@@ -122,14 +144,23 @@ class Camera2Manager(private val context: Context) {
 
             val captureCallback = object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(session: CameraCaptureSession) {
+                    // Guard: if session was already replaced, don't use this stale one
+                    if (cameraDevice == null) {
+                        session.close()
+                        continuation.resume(false)
+                        return
+                    }
                     captureSession = session
                     try {
                         previewRequestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
-                        // Apply flash mode
                         previewRequestBuilder.set(CaptureRequest.CONTROL_AE_MODE, flashMode)
                         
                         session.setRepeatingRequest(previewRequestBuilder.build(), null, backgroundHandler)
                         continuation.resume(true)
+                    } catch (e: IllegalStateException) {
+                        // Session was closed between creation and this callback
+                        Log.w("Camera2Manager", "Session closed before repeating request", e)
+                        continuation.resume(false)
                     } catch (e: CameraAccessException) {
                         Log.e("Camera2Manager", "Failed to start repeating request", e)
                         continuation.resume(false)

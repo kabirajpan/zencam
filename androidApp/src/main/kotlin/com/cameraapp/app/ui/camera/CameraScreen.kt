@@ -1,12 +1,16 @@
 package com.cameraapp.app.ui.camera
 
 import android.Manifest
+import android.content.ContentValues
 import android.graphics.SurfaceTexture
 import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import android.util.Log
 import android.view.Surface
 import android.view.TextureView
 import android.view.ViewGroup
+import android.widget.Toast
 import androidx.compose.animation.*
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -33,6 +37,8 @@ import com.google.accompanist.permissions.rememberMultiplePermissionsState
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Locale
 
 @OptIn(ExperimentalPermissionsApi::class)
 @Composable
@@ -77,7 +83,17 @@ private fun CameraContent(viewModel: CameraViewModel) {
     val cameraManager = remember { Camera2Manager(context) }
     
     var previewSurface by remember { mutableStateOf<Surface?>(null) }
-    val targetRatio = if (isLandscape) 4f / 3f else 3f / 4f
+    var surfaceTexture by remember { mutableStateOf<SurfaceTexture?>(null) }
+
+    // Always use 4:3 from the sensor — matches most phone cameras natively, no stretch
+    val previewSize = remember(uiState.currentCameraId) {
+        cameraManager.getPreviewSize(uiState.currentCameraId, 4f / 3f)
+    }
+    val targetRatio = if (isLandscape) {
+        previewSize.width.toFloat() / previewSize.height
+    } else {
+        previewSize.height.toFloat() / previewSize.width
+    }
 
     // Transition State
     var isSwitchingMode by remember { mutableStateOf(false) }
@@ -120,8 +136,13 @@ private fun CameraContent(viewModel: CameraViewModel) {
         }
     }
 
+    // When switching between photo/video, re-apply buffer size and restart preview
     LaunchedEffect(uiState.currentMode.isVideo) {
-        previewSurface?.let { cameraManager.startPreview(it) }
+        val st = surfaceTexture ?: return@LaunchedEffect
+        st.setDefaultBufferSize(previewSize.width, previewSize.height)
+        val surface = Surface(st)
+        previewSurface = surface
+        cameraManager.startPreview(surface)
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -130,7 +151,7 @@ private fun CameraContent(viewModel: CameraViewModel) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(top = 56.dp, bottom = 150.dp) // Minimal bars
+                .padding(top = 56.dp, bottom = 150.dp)
                 .clipToBounds(),
             contentAlignment = Alignment.Center
         ) {
@@ -139,11 +160,14 @@ private fun CameraContent(viewModel: CameraViewModel) {
                     TextureView(ctx).apply {
                         surfaceTextureListener = object : TextureView.SurfaceTextureListener {
                             override fun onSurfaceTextureAvailable(st: SurfaceTexture, w: Int, h: Int) {
+                                st.setDefaultBufferSize(previewSize.width, previewSize.height)
+                                surfaceTexture = st
                                 previewSurface = Surface(st)
                             }
                             override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) {}
                             override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
                                 previewSurface = null
+                                surfaceTexture = null
                                 return true
                             }
                             override fun onSurfaceTextureUpdated(st: SurfaceTexture) {}
@@ -227,17 +251,58 @@ private fun CameraContent(viewModel: CameraViewModel) {
                             cameraManager.stopRecording()
                             viewModel.setRecording(false)
                             scope.launch { cameraManager.startPreview(surf) }
+                            Toast.makeText(context, "Video saved", Toast.LENGTH_SHORT).show()
                         } else {
-                            val file = File(context.cacheDir, "vid_${System.currentTimeMillis()}.mp4")
+                            // Save video to gallery via MediaStore
+                            val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(System.currentTimeMillis())
+                            val videoFile = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                // Scoped storage — use MediaStore
+                                val values = ContentValues().apply {
+                                    put(MediaStore.Video.Media.DISPLAY_NAME, "VID_$timestamp.mp4")
+                                    put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                                    put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_DCIM + "/CameraApp")
+                                }
+                                val uri = context.contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
+                                // MediaRecorder needs a File path, so use cache then copy
+                                File(context.cacheDir, "VID_$timestamp.mp4")
+                            } else {
+                                val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM), "CameraApp")
+                                dir.mkdirs()
+                                File(dir, "VID_$timestamp.mp4")
+                            }
                             scope.launch {
-                                if (cameraManager.startRecording(surf, file)) {
+                                if (cameraManager.startRecording(surf, videoFile)) {
                                     viewModel.setRecording(true)
                                 }
                             }
                         }
                     } else {
-                        val file = File(context.cacheDir, "img_${System.currentTimeMillis()}.jpg")
-                        scope.launch { cameraManager.takePhoto(file) }
+                        // Save photo to gallery via MediaStore
+                        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(System.currentTimeMillis())
+                        val tempFile = File(context.cacheDir, "IMG_$timestamp.jpg")
+                        scope.launch {
+                            val success = cameraManager.takePhoto(tempFile)
+                            if (success) {
+                                // Insert into MediaStore so it appears in gallery
+                                val values = ContentValues().apply {
+                                    put(MediaStore.Images.Media.DISPLAY_NAME, "IMG_$timestamp.jpg")
+                                    put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                        put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_DCIM + "/CameraApp")
+                                    }
+                                }
+                                val uri = context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                                uri?.let { mediaUri ->
+                                    context.contentResolver.openOutputStream(mediaUri)?.use { out ->
+                                        tempFile.inputStream().use { input -> input.copyTo(out) }
+                                    }
+                                }
+                                tempFile.delete()
+                                Toast.makeText(context, "Photo saved", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "Capture failed", Toast.LENGTH_SHORT).show()
+                            }
+                        }
                     }
                 },
                 onGalleryClick = { /* TODO */ },
