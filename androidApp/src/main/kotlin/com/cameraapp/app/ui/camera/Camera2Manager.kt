@@ -287,7 +287,7 @@ class Camera2Manager(private val context: Context) {
         }
     }
 
-    private fun setupMediaRecorder(outputFile: File) {
+    private fun setupMediaRecorder(outputFile: File, width: Int = 1920, height: Int = 1080) {
         mediaRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             MediaRecorder(context)
         } else {
@@ -298,11 +298,13 @@ class Camera2Manager(private val context: Context) {
             setVideoSource(MediaRecorder.VideoSource.SURFACE)
             setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
             setOutputFile(outputFile.absolutePath)
-            setVideoEncodingBitRate(50000000)
+            setVideoEncodingBitRate(20_000_000)
             setVideoFrameRate(30)
-            setVideoSize(3264, 2448) 
+            setVideoSize(width, height)
             setVideoEncoder(MediaRecorder.VideoEncoder.H264)
             setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+            setAudioEncodingBitRate(128_000)
+            setAudioSamplingRate(44100)
             prepare()
         }
     }

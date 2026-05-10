@@ -84,6 +84,7 @@ private fun CameraContent(viewModel: CameraViewModel) {
     
     var previewSurface by remember { mutableStateOf<Surface?>(null) }
     var surfaceTexture by remember { mutableStateOf<SurfaceTexture?>(null) }
+    var currentVideoFile by remember { mutableStateOf<File?>(null) }
 
     // Always use 4:3 from the sensor — matches most phone cameras natively, no stretch
     val previewSize = remember(uiState.currentCameraId) {
@@ -228,18 +229,18 @@ private fun CameraContent(viewModel: CameraViewModel) {
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             CameraModeSelector(
-            currentMode = uiState.currentMode,
-            onModeSelected = { mode ->
-                if (mode != uiState.currentMode) {
-                    scope.launch {
-                        isSwitchingMode = true
-                        viewModel.setMode(mode)
-                        delay(250) // Quick, snappy transition
-                        isSwitchingMode = false
+                currentMode = uiState.currentMode,
+                onModeSelected = { mode ->
+                    if (mode != uiState.currentMode) {
+                        scope.launch {
+                            isSwitchingMode = true
+                            viewModel.setMode(mode)
+                            delay(250)
+                            isSwitchingMode = false
+                        }
                     }
                 }
-            }
-        )
+            )
 
             CameraBottomBar(
                 isRecording = uiState.isRecording,
@@ -250,26 +251,33 @@ private fun CameraContent(viewModel: CameraViewModel) {
                         if (uiState.isRecording) {
                             cameraManager.stopRecording()
                             viewModel.setRecording(false)
-                            scope.launch { cameraManager.startPreview(surf) }
-                            Toast.makeText(context, "Video saved", Toast.LENGTH_SHORT).show()
-                        } else {
-                            // Save video to gallery via MediaStore
-                            val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(System.currentTimeMillis())
-                            val videoFile = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                                // Scoped storage — use MediaStore
-                                val values = ContentValues().apply {
-                                    put(MediaStore.Video.Media.DISPLAY_NAME, "VID_$timestamp.mp4")
-                                    put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-                                    put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_DCIM + "/CameraApp")
+                            scope.launch {
+                                currentVideoFile?.let { videoFile ->
+                                    if (videoFile.exists() && videoFile.length() > 0) {
+                                        val values = ContentValues().apply {
+                                            put(MediaStore.Video.Media.DISPLAY_NAME, videoFile.name)
+                                            put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                                put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_DCIM + "/CameraApp")
+                                            }
+                                        }
+                                        val uri = context.contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
+                                        uri?.let { mediaUri ->
+                                            context.contentResolver.openOutputStream(mediaUri)?.use { out ->
+                                                videoFile.inputStream().use { input -> input.copyTo(out) }
+                                            }
+                                        }
+                                        videoFile.delete()
+                                        Toast.makeText(context, "Video saved", Toast.LENGTH_SHORT).show()
+                                    }
+                                    currentVideoFile = null
                                 }
-                                val uri = context.contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
-                                // MediaRecorder needs a File path, so use cache then copy
-                                File(context.cacheDir, "VID_$timestamp.mp4")
-                            } else {
-                                val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM), "CameraApp")
-                                dir.mkdirs()
-                                File(dir, "VID_$timestamp.mp4")
+                                cameraManager.startPreview(surf)
                             }
+                        } else {
+                            val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(System.currentTimeMillis())
+                            val videoFile = File(context.cacheDir, "VID_$timestamp.mp4")
+                            currentVideoFile = videoFile
                             scope.launch {
                                 if (cameraManager.startRecording(surf, videoFile)) {
                                     viewModel.setRecording(true)
@@ -277,13 +285,11 @@ private fun CameraContent(viewModel: CameraViewModel) {
                             }
                         }
                     } else {
-                        // Save photo to gallery via MediaStore
                         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(System.currentTimeMillis())
                         val tempFile = File(context.cacheDir, "IMG_$timestamp.jpg")
                         scope.launch {
                             val success = cameraManager.takePhoto(tempFile)
                             if (success) {
-                                // Insert into MediaStore so it appears in gallery
                                 val values = ContentValues().apply {
                                     put(MediaStore.Images.Media.DISPLAY_NAME, "IMG_$timestamp.jpg")
                                     put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
